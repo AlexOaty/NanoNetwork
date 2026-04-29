@@ -5,19 +5,23 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+
+from matplotlib.pyplot import title
 from scipy.ndimage import maximum
 from torch.nn.functional import gumbel_softmax
 
 feats = 256
-steps = 5000
-limit = 1000
+steps = 3000
+limit = 3000
 groupSize = 512
-bitLength = 20
+bitLength = 50
+bar = False
 
 delta = 2
-window_length = 4
+window_lengths = [4, 5]
 
-redundancies = np.linspace(1.8, delta * 2, 1)
+redundancy = delta
+redundancies = np.linspace(delta, delta, 1)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Encoder(nn.Module):
@@ -26,7 +30,7 @@ class Encoder(nn.Module):
         self.seq_len = int(input_bits * 0.5 * redundancy)
         self.net = nn.Sequential(
             nn.Linear(input_bits, 512),
-            nn.BatchNorm1d(512),
+            #nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Linear(512, feats),
             nn.ReLU(),
@@ -37,7 +41,7 @@ class Encoder(nn.Module):
         out = self.net(x)
         out = out.view(-1, self.seq_len, 4)
         tau = max(0.1, 2.0 * (0.99 ** epoch))
-        probs = F.gumbel_softmax(out, tau=1, hard=True, dim=-1)
+        probs = F.gumbel_softmax(out, tau=tau, hard=True, dim=-1)
         return probs
 
 
@@ -58,7 +62,7 @@ class NanoporeChannel(nn.Module):
             dna,
             kernel,
             stride=self.Delta,
-            padding=self.L - 1,
+            padding=self.L - delta,
             groups=4
         )
 
@@ -73,20 +77,17 @@ class Decoder(nn.Module):
         nanopore = NanoporeChannel(window_length, delta)
         num_windows = nanopore(dummy_dna).shape[1]
 
+        # Replace the end of your Decoder Sequential with this:
         self.net = nn.Sequential(
-            # First layer: Extract local "base-pair" features
-            nn.Conv1d(4, 128, kernel_size=7, padding=3),
+            nn.Conv1d(4, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            # Second layer: Extract "window-overlap" features
-            nn.Conv1d(128, 128, kernel_size=5, padding=2),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            # Third layer: Bring it down to a bit-like representation
             nn.Conv1d(128, 64, kernel_size=3, padding=1),
-            nn.AdaptiveAvgPool1d(output_bits), # Align signal length to bit length
-            nn.Conv1d(64, 1, kernel_size=1),    # 1 channel = 1 bit probability
+            nn.ReLU(),
             nn.Flatten(),
+            nn.Linear(64 * num_windows, 256),  # num_windows is already calculated
+            nn.ReLU(),
+            nn.Linear(256, output_bits),
             nn.Sigmoid()
         )
 
@@ -112,7 +113,8 @@ class NanoporeNetwork(nn.Module):
 input_bits = bitLength
 loss_fn = nn.BCELoss()
 
-for redundancy in redundancies:
+result = []
+for window_length in window_lengths:
     # ---- Training ----
     model = NanoporeNetwork(input_bits, redundancy).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -131,7 +133,7 @@ for redundancy in redundancies:
 
         loss = loss_fn(output, x)
 
-        if(delta == 1):
+        if(True):
             target_idx = (x[:, 0::2] * 2 + x[:, 1::2]).long()
 
             B, L = target_idx.shape
@@ -173,7 +175,8 @@ for redundancy in redundancies:
         if count >= maxL:
             print(f"Step {step}, Loss: {loss.item():.4f}")
             break
-
+        if step == steps-1:
+            result.append(loss.item())
         if step % 10 == 0:
             xpoints = np.concatenate((xpoints, np.array([step])))
             ypoints = np.concatenate((ypoints, np.array([loss.item()])))
@@ -182,19 +185,25 @@ for redundancy in redundancies:
 
 
     torch.save(model.state_dict(), f"nano_model_{bitLength}-{delta}-{window_length}.pth")
+    plt.plot(xpoints, ypoints)
+    #if bar:
+        #plt.bar(redundancy, result[-1], data=f"Redundancy: {redundancy}", width=0.03)
+        #plt.text(redundancy, result[-1], f"{result[-1]:.3f}", ha='center')
 
-    plt.plot(xpoints, ypoints, data=f"Redundancy: {redundancy}")
-
-plt.ylim(0, ypoints[0])
-plt.title(f"Delta={delta}, Window Length={window_length}")
-plt.xlabel("Steps")
+if bar:
+    plt.ylim(0, 0.2)
+    plt.xticks(redundancies.tolist())
+else:
+    plt.ylim(0, 3)
+    plt.legend(window_lengths, title="Window Length")
+plt.title(f"Delta={delta}, Window Length=4-5, Redundancy=2")
+plt.xlabel("Step")
 plt.ylabel("Loss")
-plt.legend(redundancies, title="Redundancy")
 plt.show()
 
 
 # ---- Test ----
-x_test = torch.randint(0, 2, (1, input_bits)).float().to(device)
+x_test = torch.randint(0, 2, (3, input_bits)).float().to(device)
 dna = model.encoder(x_test, 4000)
 
 print("Input bits: ", x_test)

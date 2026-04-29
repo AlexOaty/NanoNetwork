@@ -9,8 +9,8 @@ feats = 128
 epochs = 2000
 limit = 1000
 groupSize = 128
-bitLength = 4
-redundancy = 0.75
+bitLength = 50
+redundancy = 0.5
 
 class Encoder(nn.Module):
     def __init__(self, input_bits):
@@ -63,7 +63,7 @@ loss_fn = nn.BCELoss()
 
 best_loss = float("inf")
 count = 0
-max = limit
+maxL = limit
 
 xpoints = np.array([])
 ypoints = np.array([])
@@ -74,6 +74,28 @@ for epoch in range(epochs):
     x = torch.randint(0, 2, (groupSize, input_bits)).float()
     output = model(x)
     loss = loss_fn(output, x)
+
+    target_idx = (x[:, 0::2] * 2 + x[:, 1::2]).long()
+
+    B, L = target_idx.shape
+    S = model.seq_len
+
+    # Create positions in original sequence
+    pos = torch.linspace(0, (L - 1), S, device=target_idx.device)
+
+    # Convert to indices
+    idx = pos.long()  # or floor()
+
+    target_idx = target_idx.gather(1, idx.unsqueeze(0).expand(B, -1))
+
+    logits = model.encoder.net(x).view(-1, model.seq_len, 4)
+
+    dna_loss = F.cross_entropy(
+        logits.view(-1, 4),
+        target_idx.view(-1)
+    )
+
+    loss += dna_loss
 
     val_loss = loss
 
@@ -87,7 +109,7 @@ for epoch in range(epochs):
     else:
         count += 1
 
-    if count >= max:
+    if count >= maxL:
         print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
         break
 
